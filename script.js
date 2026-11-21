@@ -4,7 +4,7 @@ if ('serviceWorker' in navigator) {
 }
 
 // Konfigurasi API Key (Base64) & Model Fallback
-const ENCODED_API_KEY = ''; // Isi dengan btoa("AIzaSy...") milikmu
+const ENCODED_API_KEY = 'QVEuQWI4Uk42SS1WeVBicS1LNENNdHBtemR6SG44WXpFY0w2ZjdEQ1RsWVVFaGZLZzRjZFE='; // Isi dengan btoa("AIzaSy...") milikmu
 const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash-lite'];
 const VALID_VOUCHERS = ['SYNTHPRO26', 'UJIANLULUS', 'PELAJARPRO'];
 const FREE_DAILY_LIMIT = 3;
