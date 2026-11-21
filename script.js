@@ -3,9 +3,14 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
 
-// Konfigurasi API Key (Base64) & Model Fallback
+// Konfigurasi API Key (Base64) & Rantai Model Fallback
 const ENCODED_API_KEY = 'QVEuQWI4Uk42SS1WeVBicS1LNENNdHBtemR6SG44WXpFY0w2ZjdEQ1RsWVVFaGZLZzRjZFE='; // Isi dengan btoa("AIzaSy...") milikmu
-const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash-lite'];
+const MODELS = [
+  'gemini-2.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.6-flash',
+  'gemini-2.5-flash-lite'
+];
 const VALID_VOUCHERS = ['SYNTHPRO26', 'UJIANLULUS', 'PELAJARPRO'];
 const FREE_DAILY_LIMIT = 3;
 
@@ -76,30 +81,66 @@ document.getElementById('backToMainBtn').onclick = showMainPage;
 document.getElementById('stayFreeBtn').onclick = showMainPage;
 document.getElementById('goHomeBrand').onclick = showMainPage;
 
+// Kompresi Gambar Otomatis agar Cepat & Anti-Timeout
+function compressImage(file, maxWidth = 1280, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxWidth) {
+          height = Math.round((height * maxWidth) / width);
+          width = maxWidth;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve({
+          dataUrl,
+          base64: dataUrl.split(',')[1],
+          mimeType: 'image/jpeg',
+          name: file.name
+        });
+      };
+      img.onerror = reject;
+      img.src = event.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 // Penanganan Upload & Preview Gambar
 const imageInput = document.getElementById('imageInput');
 const imagePreviewBox = document.getElementById('imagePreviewBox');
 const imagePreview = document.getElementById('imagePreview');
 const imageName = document.getElementById('imageName');
 
-imageInput.addEventListener('change', (e) => {
+imageInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUrl = reader.result;
-    const base64Data = dataUrl.split(',')[1];
+  try {
+    const compressed = await compressImage(file);
     state.selectedImage = {
-      base64: base64Data,
-      mimeType: file.type || 'image/jpeg',
-      name: file.name
+      base64: compressed.base64,
+      mimeType: compressed.mimeType,
+      name: compressed.name
     };
-    imagePreview.src = dataUrl;
-    imageName.textContent = file.name;
+    imagePreview.src = compressed.dataUrl;
+    imageName.textContent = compressed.name;
     imagePreviewBox.classList.remove('hidden');
-  };
-  reader.readAsDataURL(file);
+  } catch (err) {
+    document.getElementById('statusMsg').textContent = 'Gagal memuat gambar.';
+  }
 });
 
 document.getElementById('removeImageBtn').onclick = () => {
@@ -135,12 +176,22 @@ document.getElementById('redeemBtn').onclick = () => {
   }
 };
 
-// Pemanggilan Gemini API (Multimodal: Teks + Gambar)
-async function callGemini(noteText, imageObj) {
+// Helper Jeda Retry
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Pemanggilan Gemini API (Multimodal + Retry + Multi-Model Fallback)
+async function callGemini(noteText, imageObj, onStatusUpdate) {
   if (!ENCODED_API_KEY) {
     throw new Error('API Key belum diisi di script.js (ENCODED_API_KEY).');
   }
-  const apiKey = atob(ENCODED_API_KEY);
+
+  let apiKey;
+  try {
+    apiKey = atob(ENCODED_API_KEY.trim());
+  } catch {
+    throw new Error('Format ENCODED_API_KEY bukan Base64 yang valid.');
+  }
+
   const quizCount = state.isPro ? 7 : 3;
 
   const instruction = `Kamu adalah asisten belajar pelajar Indonesia. Analisis materi dari teks dan/atau gambar catatan yang diberikan, lalu ubah menjadi JSON valid tanpa markdown backticks dengan struktur persis:
@@ -172,28 +223,53 @@ Buat ${quizCount} soal latihan. ${noteText ? `Catatan tambahan pengguna:\n${note
   }
 
   let lastError = null;
+
   for (const model of MODELS) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts }],
-            generationConfig: { responseMimeType: 'application/json' }
-          })
+    // Coba maksimal 2 kali per model jika terjadi HTTP 503 atau 429
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        if (onStatusUpdate) {
+          onStatusUpdate(
+            attempt === 1
+              ? `Memproses dengan ${model}...`
+              : `Server sibuk, mencoba ulang ${model} (${attempt}/2)...`
+          );
         }
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status} (${model})`);
-      const data = await res.json();
-      const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-      return JSON.parse(rawText);
-    } catch (err) {
-      lastError = err;
+
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts }],
+              generationConfig: { responseMimeType: 'application/json' }
+            })
+          }
+        );
+
+        if (!res.ok) {
+          const err = new Error(`HTTP ${res.status} (${model})`);
+          // Jika server sibuk (503) atau rate limit (429), tunggu sebentar lalu retry
+          if ((res.status === 503 || res.status === 429) && attempt < 2) {
+            await sleep(1200 * attempt);
+            continue;
+          }
+          throw err;
+        }
+
+        const data = await res.json();
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+        const cleanJson = rawText.replace(/```json|```/gi, '').trim();
+        return JSON.parse(cleanJson);
+      } catch (err) {
+        lastError = err;
+        break; // Pindah ke model cadangan berikutnya
+      }
     }
   }
-  throw lastError;
+
+  throw lastError || new Error('Semua server model AI sedang sibuk. Coba beberapa saat lagi.');
 }
 
 // Render Hasil ke Tampilan
@@ -298,12 +374,12 @@ document.getElementById('generateBtn').onclick = async () => {
   }
 
   btn.disabled = true;
-  status.textContent = state.selectedImage
-    ? 'AI sedang membaca foto catatan & menyusun peta konsep...'
-    : 'AI sedang menyusun peta konsep & kuis...';
 
   try {
-    const result = await callGemini(text, state.selectedImage);
+    const result = await callGemini(text, state.selectedImage, (msg) => {
+      status.textContent = msg;
+    });
+
     if (!state.isPro) {
       state.quota.used += 1;
       saveQuota();
